@@ -1,0 +1,131 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+enum UserStatus {
+  ACTIVE // checking in normally
+  OVERDUE // missed a check-in, inside the grace period
+  VERIFYING // grace period lapsed, verifier has been asked to confirm
+  RELEASED // verifier confirmed + supplied the recovery share, vault opened
+}
+
+model User {
+  id       String @id @default(cuid())
+  email    String @unique
+  passwordHash String
+
+  // --- check-in / dead man's switch ---
+  checkInIntervalDays Int        @default(30)
+  graceDays           Int        @default(7)
+  lastCheckInAt       DateTime   @default(now())
+  status              UserStatus @default(ACTIVE)
+
+  // --- zero-knowledge vault ---
+  // vaultSalt is public (used to re-derive the vault key from the user's
+  // passphrase on every device). The passphrase itself never reaches the
+  // server. See src/lib/vault-crypto.ts.
+  vaultSalt        String?
+  // A known plaintext encrypted with the vault key, so a device (or a
+  // reconstructed key during the trigger flow) can check "is this the
+  // right key?" without the server ever learning the key itself.
+  vaultCanaryIv     String?
+  vaultCanaryCipher String?
+  // One half of the vault key (XOR 2-of-2 split). Meaningless on its own -
+  // reconstructing the key requires the other half, which only the
+  // verifier holds and the server never stores. See src/lib/secret-split.ts.
+  serverKeyShare    String?
+
+  // --- verifier (death confirmation) ---
+  verifierName  String?
+  verifierEmail String?
+
+  recipients     Recipient[]
+  messages       Message[]
+  verifierTokens VerifierToken[]
+  auditEvents    AuditEvent[]
+
+  createdAt DateTime @default(now())
+}
+
+model Recipient {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name         String
+  email        String
+  relationship String?
+  messages     Message[]
+  deliveryGrants DeliveryGrant[]
+  createdAt    DateTime @default(now())
+}
+
+enum MessageStatus {
+  PENDING
+  DELIVERED
+}
+
+model Message {
+  id          String        @id @default(cuid())
+  userId      String
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  recipientId String
+  recipient   Recipient     @relation(fields: [recipientId], references: [id], onDelete: Cascade)
+  title       String
+  kind        String        @default("note") // "note" | "vault-item" (password/PIN etc.)
+  cipherIv    String
+  cipherText  String
+  status      MessageStatus @default(PENDING)
+  // Only populated after a verified trigger reconstructs the vault key.
+  deliveredPlaintext String?
+  deliveredAt        DateTime?
+  createdAt   DateTime      @default(now())
+}
+
+model VerifierToken {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token     String    @unique
+  createdAt DateTime  @default(now())
+  usedAt    DateTime?
+}
+
+model DeliveryGrant {
+  id          String    @id @default(cuid())
+  recipientId String
+  recipient   Recipient @relation(fields: [recipientId], references: [id], onDelete: Cascade)
+  token       String    @unique
+  createdAt   DateTime  @default(now())
+  expiresAt   DateTime
+}
+
+// Append-only trail: check-ins, reminders, status changes, deliveries.
+// This is the record you'd show a family member or a lawyer to prove the
+// process ran correctly.
+model AuditEvent {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      String
+  detail    String?
+  createdAt DateTime @default(now())
+}
+
+// Local dev / demo email adapter - see src/lib/mailer.ts. If RESEND_API_KEY
+// is set, real email is sent via Resend and also logged here; otherwise
+// mail only ever lands here, viewable at /admin/outbox.
+model OutboxEmail {
+  id        String   @id @default(cuid())
+  to        String
+  subject   String
+  body      String
+  createdAt DateTime @default(now())
+}
